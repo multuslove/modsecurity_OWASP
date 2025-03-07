@@ -3,8 +3,6 @@ name: Build OWASP ModSecurity Rules for OpenResty
 on:
   push:
     branches: [ main ]
-  schedule:
-    - cron: '0 0 * * *'  # 每天UTC午夜自动构建最新规则
   workflow_dispatch:
 
 jobs:
@@ -12,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: openresty/openresty:alpine
-      options: --privileged  # ModSecurity需要特权模式加载规则
+      options: --cap-add=SYS_PTRACE
 
     steps:
     - name: Checkout repository
@@ -25,7 +23,7 @@ jobs:
           unzip \
           git \
           curl \
-          modsecurity-crs  # Alpine仓库中的基础规则
+          libmodsecurity
 
     - name: Download OWASP CRS
       run: |
@@ -39,7 +37,7 @@ jobs:
       run: |
         # 生成主配置文件
         cat <<EOF > /etc/modsecurity/modsecurity.conf
-        SecRuleEngine DetectionOnly  # 生产环境改为On
+        SecRuleEngine DetectionOnly
         SecAuditLog /var/log/modsec_audit.log
         SecAuditLogFormat JSON
         SecAuditLogType Serial
