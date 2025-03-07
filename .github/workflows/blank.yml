@@ -23,7 +23,7 @@ jobs:
           unzip \
           git \
           curl \
-          libmodsecurity
+          world[libmodsecurity]
 
     - name: Download OWASP CRS
       run: |
