@@ -1,113 +1,112 @@
 # ----------------------
-# 第一阶段：精准构建环境
+# 第一阶段：构建环境
 # ----------------------
-FROM openresty/openresty:alpine-fat AS builder
+FROM debian:bookworm-slim AS builder
 
-# 使用官方推荐版本组合（已验证兼容性）
-ARG MODSEC_VERSION=v3.0.11
-ARG MODSEC_NGINX_VERSION=v1.0.4
+ARG MODSEC3_VERSION=3.0.11
 ARG CRS_VERSION=3.3.4
+ARG LMDB_VERSION=0.9.31
+ARG LUA_VERSION=5.1
 
-# 精准安装编译依赖（Alpine特有包名）
-RUN apk add --no-cache --virtual .build-deps \
-    build-base \
-    autoconf \
+# 安装构建依赖
+RUN apt-get update -qq && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+    build-essential \
     automake \
+    cmake \
     libtool \
-    pcre-dev \
-    libxml2-dev \
-    yajl-dev \
-    lmdb-dev \
-    ssdeep-dev \
     git \
     curl \
-    linux-headers \
+    libcurl4-gnutls-dev \
+    libfuzzy-dev \
+    liblua${LUA_VERSION}-dev \
+    libpcre3-dev \
+    libpcre2-dev \
+    libxml2-dev \
     libmaxminddb-dev \
-    geoip-dev
+    libyajl-dev \
+    zlib1g-dev \
+    pkg-config \
+    ruby
 
-# —— 关键步骤1：编译ModSecurity3 ——
-RUN git clone --depth 1 --branch ${MODSEC_VERSION} https://github.com/SpiderLabs/ModSecurity && \
+# 构建LMDB
+WORKDIR /sources
+RUN git clone --branch LMDB_${LMDB_VERSION} --depth 1 https://github.com/LMDB/lmdb && \
+    make -C lmdb/libraries/liblmdb install && \
+    strip /usr/local/lib/liblmdb.so*
+
+# 构建ModSecurity
+RUN git clone --depth 1 --branch v${MODSEC3_VERSION} https://github.com/owasp-modsecurity/ModSecurity && \
     cd ModSecurity && \
-    # Alpine系统必须的构建调整
-    sed -i 's/--enable-shared/--enable-static --disable-shared/g' build.sh && \
     ./build.sh && \
     ./configure \
-      --prefix=/usr/local \
-      --with-lmdb \
-      --with-ssdeep \
       --with-yajl \
-      --with-pcre \
-      --with-libxml \
-      --enable-static \
-      --disable-shared && \
-    make -j$(nproc) && \
-    make install
-
-# —— 关键步骤2：编译Nginx模块 ——
-RUN curl -sSL https://github.com/SpiderLabs/ModSecurity-nginx/archive/refs/tags/${MODSEC_NGINX_VERSION}.tar.gz | \
-    tar -xz && \
-    cd /usr/local/openresty/nginx && \
-    # 精准匹配OpenResty的configure参数
-    ./configure \
-      --with-compat \
-      --with-cc-opt='-DNGX_HTTP_MODSECURITY -I/usr/local/include/ModSecurity' \
-      --add-dynamic-module=../../ModSecurity-nginx-${MODSEC_NGINX_VERSION#v} && \
-    make -j$(nproc) modules && \
-    # 强制验证模块存在
-    test -f objs/ngx_http_modsecurity_module.so && \
-    cp objs/ngx_http_modsecurity_module.so modules/
-
-# —— 关键步骤3：准备规则集 ——
-RUN mkdir -p /etc/modsecurity && \
-    curl -sSL https://github.com/coreruleset/coreruleset/archive/v${CRS_VERSION}.tar.gz | tar -xz && \
-    mv coreruleset-${CRS_VERSION} /etc/modsecurity/crs && \
-    # 生成合并配置
-    printf "# Auto-generated config\nInclude /etc/modsecurity/crs/crs-setup.conf\nInclude /etc/modsecurity/crs/rules/*.conf" \
-    > /etc/modsecurity/main.conf
+      --with-ssdeep \
+      --with-pcre2 \
+      --with-maxmind \
+      --enable-shared \
+      --enable-static && \
+    make -j$(nproc) install && \
+    ldconfig
 
 # ----------------------
-# 第二阶段：精简直销镜像
+# 第二阶段：运行时环境
 # ----------------------
-FROM openresty/openresty:alpine
+FROM openresty/openresty:bullseye
 
-# 精准复制产物（Alpine路径严格校验）
-COPY --from=builder \
-    /usr/local/openresty/nginx/modules/ngx_http_modsecurity_module.so \
-    /usr/local/openresty/nginx/modules/
+ARG MODSEC3_VERSION
+ARG LUA_VERSION
+ARG CRS_VERSION
 
-COPY --from=builder \
-    /usr/local/lib/libmodsecurity.a \
-    /usr/local/lib/libssdeep.* \
-    /usr/local/lib/liblmdb.* \
-    /usr/local/lib/libyajl.* \
-    /usr/local/lib/
+# 复制构建产物
+COPY --from=builder /usr/local/lib/liblmdb.so* /usr/local/lib/
+COPY --from=builder /usr/local/modsecurity/ /usr/local/modsecurity/
 
-# 复制配置文件
-COPY --from=builder /etc/modsecurity /etc/modsecurity
-
-# Alpine运行时依赖（最小化安装）
-RUN apk add --no-cache \
-    libstdc++ \
-    lmdb \
-    yajl \
+# 安装运行时依赖
+RUN apt-get update -qq && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+    libcurl4-gnutls-dev \
+    libfuzzy2 \
+    liblua${LUA_VERSION} \
     libxml2 \
-    pcre \
-    ssdeep \
-    libmaxminddb \
-    && ln -s /usr/lib/libssdeep.so.2 /usr/lib/libssdeep.so \
-    && ln -s /usr/lib/liblmdb.so.0 /usr/lib/liblmdb.so \
-    && ln -s /usr/lib/libyajl.so.2 /usr/lib/libyajl.so \
-    && ldconfig /usr/lib
+    libyajl2 \
+    libmaxminddb-dev \
+    ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
 
-# 强制模块加载验证
-RUN echo "load_module modules/ngx_http_modsecurity_module.so;" \
-    > /usr/local/openresty/nginx/conf/modsecurity.load && \
-    nginx -t 2>&1 | grep -q "modsecurity module is available"
+# 配置动态库路径
+ENV LD_LIBRARY_PATH /usr/local/lib:/usr/local/modsecurity/lib:$LD_LIBRARY_PATH
 
-# 安全增强配置
-RUN mkdir -p /var/log/modsecurity && \
-    chown -R nobody:nogroup /var/log/modsecurity && \
-    sed -i \
-      -e 's/SecRuleEngine DetectionOnly/SecRuleEngine On/' \
-      -e 's#SecAuditLog /var/log/modsec_audit.log#SecAuditLog /var/log/modsecurity/audit.log#' \
-      /etc/modsecurity/modsecurity.conf
+# 创建必要目录
+RUN mkdir -p \
+    /var/log/modsecurity \
+    /etc/modsecurity.d \
+    /opt/owasp-crs \
+    /tmp/modsecurity/{data,upload,tmp}
+
+# 复制CRS规则集
+COPY --from=owasp/modsecurity-crs:${CRS_VERSION} /opt/owasp-crs /opt/owasp-crs
+
+# 配置文件和模板
+COPY config/modsecurity.conf /etc/modsecurity.d/
+COPY config/crs-setup.conf /opt/owasp-crs/
+COPY nginx.conf /usr/local/openresty/nginx/conf/
+
+# 符号链接处理
+RUN ln -s /usr/local/modsecurity/lib/libmodsecurity.so.${MODSEC3_VERSION} \
+    /usr/local/modsecurity/lib/libmodsecurity.so && \
+    ldconfig
+
+# 安全加固
+RUN chown -R nobody:nogroup \
+    /var/log/modsecurity \
+    /tmp/modsecurity && \
+    find /tmp/modsecurity -type d -exec chmod 1777 {} \;
+
+# 健康检查
+HEALTHCHECK --interval=30s --timeout=10s \
+    CMD curl -f http://localhost:8080/health || exit 1
+
+EXPOSE 8080 8443
+
+CMD ["/usr/local/openresty/bin/openresty", "-g", "daemon off;"]
