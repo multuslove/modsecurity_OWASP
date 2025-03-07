@@ -1,0 +1,92 @@
+name: Build OWASP ModSecurity Rules for OpenResty
+
+on:
+  push:
+    branches: [ main ]
+  schedule:
+    - cron: '0 0 * * *'  # 每天UTC午夜自动构建最新规则
+  workflow_dispatch:
+
+jobs:
+  build-modsecurity-rules:
+    runs-on: ubuntu-latest
+    container:
+      image: openresty/openresty:alpine
+      options: --privileged  # ModSecurity需要特权模式加载规则
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Install dependencies
+      run: |
+        apk add --no-cache \
+          wget \
+          unzip \
+          git \
+          curl \
+          modsecurity-crs  # Alpine仓库中的基础规则
+
+    - name: Download OWASP CRS
+      run: |
+        CRS_VERSION="3.3.4"  # 指定OWASP规则版本
+        wget -qO crs.zip https://github.com/coreruleset/coreruleset/archive/refs/tags/v${CRS_VERSION}.zip
+        unzip crs.zip -d /etc/modsecurity/
+        mv /etc/modsecurity/coreruleset-${CRS_VERSION} /etc/modsecurity/crs
+        rm crs.zip
+
+    - name: Configure ModSecurity
+      run: |
+        # 生成主配置文件
+        cat <<EOF > /etc/modsecurity/modsecurity.conf
+        SecRuleEngine DetectionOnly  # 生产环境改为On
+        SecAuditLog /var/log/modsec_audit.log
+        SecAuditLogFormat JSON
+        SecAuditLogType Serial
+        SecDebugLog /var/log/modsec_debug.log
+        SecDebugLogLevel 0
+        Include /etc/modsecurity/crs/crs-setup.conf
+        Include /etc/modsecurity/crs/rules/*.conf
+        EOF
+
+        # 应用自定义规则补丁（如有）
+        if [ -f ./custom_rules.patch ]; then
+          patch -d /etc/modsecurity/crs -p1 < ./custom_rules.patch
+        fi
+
+    - name: Validate configuration
+      run: |
+        # 创建必要目录
+        mkdir -p /var/log/nginx/modsec
+        touch /var/log/modsec_audit.log
+
+        # 生成测试用nginx配置
+        cat <<EOF > /tmp/nginx-test.conf
+        load_module modules/ngx_http_modsecurity_module.so;
+        
+        events {}
+        http {
+            modsecurity on;
+            modsecurity_rules_file /etc/modsecurity/modsecurity.conf;
+            
+            server {
+                listen 8080;
+                location / {
+                    modsecurity_rules off;  # 仅测试全局配置
+                    return 200 "Config Test OK";
+                }
+            }
+        }
+        EOF
+
+        # 测试配置语法
+        nginx -t -c /tmp/nginx-test.conf
+
+    - name: Archive artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: modsecurity-rules
+        path: |
+          /etc/modsecurity/
+          /usr/local/openresty/nginx/conf/modsecurity.conf
+        retention-days: 7
