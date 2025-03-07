@@ -9,21 +9,21 @@ jobs:
   build-modsecurity-rules:
     runs-on: ubuntu-latest
     container:
-      image: openresty/openresty:alpine
+      # 关键修改点：使用包含编译工具的 fat 镜像
+      image: openresty/openresty:alpine-fat
       options: --cap-add=SYS_PTRACE --volume ${{ github.workspace }}:/github/workspace
 
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
 
-    - name: Install dependencies
+    - name: Install basic tools
       run: |
+        # 精简依赖安装（fat 镜像已包含构建工具）
         apk add --no-cache \
           wget \
           unzip \
-          git \
-          curl \
-          world[libmodsecurity]
+          git
 
     - name: Download OWASP CRS
       run: |
@@ -35,6 +35,9 @@ jobs:
 
     - name: Configure ModSecurity
       run: |
+        # 确认 ModSecurity 模块已存在
+        ls -l /usr/local/openresty/nginx/modules/ngx_http_modsecurity_module.so
+
         cat <<EOF > /etc/modsecurity/modsecurity.conf
         SecRuleEngine DetectionOnly
         SecAuditLog /var/log/modsec_audit.log
@@ -46,6 +49,7 @@ jobs:
         Include /etc/modsecurity/crs/rules/*.conf
         EOF
 
+        # 应用自定义补丁（如果存在）
         if [ -f ./custom_rules.patch ]; then
           patch -d /etc/modsecurity/crs -p1 < ./custom_rules.patch
         fi
@@ -55,8 +59,9 @@ jobs:
         mkdir -p /var/log/nginx/modsec
         touch /var/log/modsec_audit.log
 
+        # 生成测试配置（直接使用镜像中的模块路径）
         cat <<EOF > /tmp/nginx-test.conf
-        load_module modules/ngx_http_modsecurity_module.so;
+        load_module /usr/local/openresty/nginx/modules/ngx_http_modsecurity_module.so;
         
         events {}
         http {
@@ -73,6 +78,7 @@ jobs:
         }
         EOF
 
+        # 关键验证：测试配置文件
         nginx -t -c /tmp/nginx-test.conf
 
     - name: Archive artifacts
